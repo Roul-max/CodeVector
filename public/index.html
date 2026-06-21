@@ -1,0 +1,226 @@
+﻿<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Product Browser</title>
+<style>
+  :root {
+    --bg: #09090b;
+    --surface: #18181b;
+    --border: #27272a;
+    --text: #e4e4e7;
+    --muted: #71717a;
+    --accent: #8b5cf6;
+    --accent-dim: #7c3aed33;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 28px 32px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  h1 {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  h1 span { color: var(--accent); }
+  .controls { display: flex; gap: 10px; align-items: center; }
+  select, button {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  select:focus, button:focus { outline: 2px solid var(--accent-dim); outline-offset: 1px; }
+  button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+    font-weight: 500;
+  }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  main { padding: 24px 32px; max-width: 1100px; margin: 0 auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th {
+    text-align: left;
+    color: var(--muted);
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 11px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  tr:hover td { background: var(--surface); }
+  .price { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .id { color: var(--muted); font-variant-numeric: tabular-nums; font-size: 12px; }
+  .footer-bar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 16px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .nav { display: flex; gap: 8px; }
+  .status { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .new-row td { animation: flash 1.2s ease-out; }
+  @keyframes flash {
+    0% { background: var(--accent-dim); }
+    100% { background: transparent; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>codevector<span>.products</span></h1>
+  <div class="controls">
+    <select id="category"><option value="">All categories</option></select>
+    <button id="simulate">Simulate 50 writes</button>
+  </div>
+</header>
+<main>
+  <table>
+    <thead>
+      <tr><th>ID</th><th>Name</th><th>Category</th><th>Price</th><th>Created</th></tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="footer-bar">
+    <div class="nav">
+      <button id="prev">← Prev</button>
+      <button id="next">Next →</button>
+    </div>
+    <div id="pageInfo"></div>
+  </div>
+  <div class="status" id="status"></div>
+</main>
+
+<script>
+const API = ""; // same origin
+const els = {
+  rows: document.getElementById("rows"),
+  category: document.getElementById("category"),
+  prev: document.getElementById("prev"),
+  next: document.getElementById("next"),
+  pageInfo: document.getElementById("pageInfo"),
+  status: document.getElementById("status"),
+  simulate: document.getElementById("simulate"),
+};
+
+let cursorStack = [null]; // history of cursors, index = page number (0-based)
+let pageIndex = 0;
+let nextCursor = null;
+let hasMore = false;
+
+async function loadCategories() {
+  const res = await fetch(`${API}/categories`);
+  const cats = await res.json();
+  for (const c of cats) {
+    const opt = document.createElement("option");
+    opt.value = c; opt.textContent = c;
+    els.category.appendChild(opt);
+  }
+}
+
+async function loadPage(cursor) {
+  els.status.textContent = "Loadingâ€¦";
+  const params = new URLSearchParams({ limit: 20 });
+  if (cursor) params.set("cursor", cursor);
+  if (els.category.value) params.set("category", els.category.value);
+
+  const res = await fetch(`${API}/products?${params}`);
+  const json = await res.json();
+
+  els.rows.innerHTML = "";
+  for (const p of json.data) {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td class="id">#${p.id}</td>
+      <td>${p.name}</td>
+      <td>${p.category}</td>
+      <td class="price">$${Number(p.price).toFixed(2)}</td>
+      <td>${new Date(p.created_at).toLocaleDateString()}</td>`;
+    els.rows.appendChild(tr);
+  }
+
+  nextCursor = json.nextCursor;
+  hasMore = json.hasMore;
+  els.next.disabled = !hasMore;
+  els.prev.disabled = pageIndex === 0;
+  els.pageInfo.textContent = `Page ${pageIndex + 1}`;
+  els.status.textContent = `Showing ${json.data.length} products`;
+}
+
+els.next.addEventListener("click", () => {
+  if (!hasMore) return;
+  cursorStack.push(nextCursor);
+  pageIndex++;
+  loadPage(cursorStack[pageIndex]);
+});
+
+els.prev.addEventListener("click", () => {
+  if (pageIndex === 0) return;
+  pageIndex--;
+  loadPage(cursorStack[pageIndex]);
+});
+
+els.category.addEventListener("change", () => {
+  cursorStack = [null];
+  pageIndex = 0;
+  loadPage(null);
+});
+
+async function simulateWrites() {
+  els.simulate.disabled = true;
+  els.status.textContent = "Inserting/updating 50 products...";
+
+  try {
+    const res = await fetch(`${API}/simulate-writes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ count: 50 }),
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`POST /simulate-writes failed with ${res.status}: ${body}`);
+    }
+
+    await loadPage(cursorStack[pageIndex]);
+    els.status.textContent = "Done. Keep paginating - no duplicates or skips, even on already-fetched pages.";
+  } catch (err) {
+    console.error(err);
+    els.status.textContent = "Simulate writes failed. Check the console/server logs.";
+  } finally {
+    els.simulate.disabled = false;
+  }
+}
+
+els.simulate.addEventListener("click", simulateWrites);
+
+loadCategories();
+loadPage(null);
+</script>
+</body>
+</html>

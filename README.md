@@ -1,0 +1,246 @@
+# CodeVector Product Browser
+
+## What this is
+
+This is a backend for browsing about 200,000 products, newest first, filterable by category, and paginated in a way that stays correct even while products are being added or updated concurrently.
+
+## Stack
+
+- Node.js
+- Express
+- PostgreSQL, hosted on Supabase
+- Plain HTML and JavaScript frontend
+
+This stack matches my existing experience and keeps the project focused on the backend behavior. PostgreSQL is a good fit because its tuple comparison syntax and composite indexes make the pagination logic clean to implement, reason about, and explain.
+
+## The core problem and why OFFSET/LIMIT pagination is wrong here
+
+The simple approach would be:
+
+```sql
+SELECT *
+FROM products
+ORDER BY created_at DESC
+LIMIT 20 OFFSET 5000;
+```
+
+That has two problems for this project.
+
+First, it gets slower the deeper the user paginates. To serve a page with a large offset, the database still has to walk through every row before that offset and discard those rows before returning the page. Page 1 is cheap, but page 500 means scanning and throwing away thousands of rows first.
+
+Second, it is unsafe while writes are happening. OFFSET means "start at this numeric position in the current result set." If a new row is inserted while a user is halfway through browsing, every row after that insert shifts down by one position. The user can then see a product twice or skip a product entirely.
+
+## The fix: keyset/cursor pagination
+
+The server uses keyset pagination instead of offset pagination. The actual query shape in `src/server.js` is:
+
+```sql
+WHERE (created_at, id) < (cursor_created_at, cursor_id)
+ORDER BY created_at DESC, id DESC
+```
+
+The cursor is the last `(created_at, id)` pair from the previous page. Instead of saying "skip N rows," the client says "give me the next rows older than this exact row."
+
+This is backed by the composite index in `db/schema.sql`:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_products_created_at_id
+  ON products (created_at DESC, id DESC);
+```
+
+There is also a category-aware index:
+
+```sql
+CREATE INDEX IF NOT EXISTS idx_products_category_created_at_id
+  ON products (category, created_at DESC, id DESC);
+```
+
+This is fast at any page depth because PostgreSQL can do an indexed range scan from the cursor anchor instead of scanning and discarding rows. It is also safe under writes because the cursor is a fixed anchor, not a shifting numeric position.
+
+## Why the cursor is (created_at, id) together, not created_at alone
+
+`created_at` is not guaranteed to be unique. Multiple products can share the same timestamp, especially when rows are inserted in batches. If the cursor used only `created_at`, rows with the same timestamp could be skipped or repeated because the ordering would not be fully deterministic.
+
+`id` is unique and monotonic because the schema uses `BIGSERIAL PRIMARY KEY`. Combining `created_at` with `id` gives a stable total order:
+
+```sql
+ORDER BY created_at DESC, id DESC
+```
+
+That pair is what makes the cursor precise.
+
+## Why created_at and not updated_at is the sort/cursor key
+
+"Newest first" means insertion order in this project, so the list is sorted by `created_at`, not `updated_at`.
+
+That matters because editing a product should not move its position in the paginated list. If a product's price changes, `updated_at` changes, but its `created_at` stays the same. Existing cursors remain valid because the row does not jump to a different position in the sort order.
+
+If `updated_at` were the sort key, any edit could move a row to the top of the list while a user is mid-browse. That would recreate the same duplicate/skip problem this design is avoiding.
+
+## Seeding 200k rows fast
+
+`scripts/seed.js` generates 200,000 products and inserts them in batches of 1,000 rows per statement.
+
+Instead of running 200,000 individual INSERT statements, it builds parameterized multi-row INSERT statements like:
+
+```sql
+INSERT INTO products (name, category, price, created_at, updated_at)
+VALUES (...), (...), (...);
+```
+
+That matters because individual inserts would spend a lot of time on network round trips and per-statement parse/plan overhead. Batching reduces the work to about 200 INSERT statements, which is much faster and still simple enough to explain.
+
+The seed script also spreads `created_at` values over roughly the last 365 days so newest-first pagination has realistic data to sort.
+
+## API reference
+
+### GET /products
+
+Returns a page of products sorted by `created_at DESC, id DESC`.
+
+Query params:
+
+- `category`: optional exact category filter
+- `cursor`: optional opaque cursor from the previous response
+- `limit`: optional page size, defaults to 20 and is capped at 100
+
+Example request:
+
+```http
+GET /products?category=Electronics&limit=20
+```
+
+Example response:
+
+```json
+{
+  "data": [
+    {
+      "id": "202250",
+      "name": "Live New Product 1782069063838-49",
+      "category": "Electronics",
+      "price": "99.99",
+      "created_at": "2026-06-21T19:11:01.628Z",
+      "updated_at": "2026-06-21T19:11:01.628Z"
+    }
+  ],
+  "nextCursor": "MjAyNi0wNi0yMVQxOToxMTowMS42MjhafDIwMjI1MA==",
+  "hasMore": true
+}
+```
+
+The cursor is generated by the server as base64 of:
+
+```text
+<created_at_iso>|<id>
+```
+
+### GET /categories
+
+Returns distinct product categories for the filter dropdown.
+
+Example request:
+
+```http
+GET /categories
+```
+
+Example response:
+
+```json
+[
+  "Automotive",
+  "Beauty",
+  "Books",
+  "Clothing",
+  "Electronics"
+]
+```
+
+### POST /simulate-writes
+
+Development helper used to test concurrent writes while browsing. It inserts `count` new products and updates `count` random existing products inside a transaction.
+
+Example request:
+
+```http
+POST /simulate-writes
+Content-Type: application/json
+
+{
+  "count": 50
+}
+```
+
+Example response:
+
+```json
+{
+  "inserted": 50,
+  "updated": 50
+}
+```
+
+The route caps `count` at 500.
+
+### GET /health
+
+Simple health check.
+
+Example request:
+
+```http
+GET /health
+```
+
+Example response:
+
+```json
+{
+  "ok": true
+}
+```
+
+## Running locally
+
+```bash
+npm install
+cp .env.example .env
+npm run migrate
+npm run seed
+npm start
+```
+
+Fill `DATABASE_URL` in `.env` with the pooled connection string from Supabase Project Settings -> Database. Use port `6543` with Transaction mode.
+
+After starting the server, open:
+
+```text
+http://localhost:3000
+```
+
+## How to verify correctness under concurrent writes
+
+1. Start on page 1 in the UI or call `GET /products`.
+2. Paginate forward a few pages and keep track of the product IDs you have seen.
+3. Without going back to page 1, call `POST /simulate-writes` or click the "Simulate 50 writes" button in the UI.
+4. Continue paginating forward using the existing cursor flow.
+5. Confirm that products on the pages you have not revisited are not repeated or skipped.
+
+The new products should appear above your current position because they have newer `created_at` values. They should not appear in the middle of the already anchored pagination path.
+
+## Known issue I hit and fixed
+
+The `simulate-writes` button initially appeared not to work because the click handler fired the POST request successfully but never refreshed the visible product list afterward. The database write succeeded, but the UI looked unchanged.
+
+I fixed it by checking the POST response and re-fetching the current page after the write completes.
+
+## What I'd improve with more time
+
+- Add an automated test for the concurrent-write scenario instead of relying on manual verification.
+- Commit `EXPLAIN ANALYZE` output showing PostgreSQL is using the composite index.
+- Add stronger input validation and rate limiting before treating the endpoints as production-ready.
+
+## How I used AI
+
+I used Claude/Codex to scaffold boilerplate and debug the `simulate-writes` UI bug. The core pagination design decisions - cursor pagination instead of offset pagination, using `(created_at, id)` as the composite cursor, and sorting by `created_at` instead of `updated_at` - were my own reasoning, and I made sure I could fully explain them.
