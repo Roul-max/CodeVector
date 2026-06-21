@@ -52,6 +52,18 @@ const pool = new Pool({
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
+const CATEGORIES = [
+  "Electronics",
+  "Home & Kitchen",
+  "Books",
+  "Clothing",
+  "Sports",
+  "Toys",
+  "Beauty",
+  "Automotive",
+  "Garden",
+  "Office Supplies",
+];
 
 // Cursor is just base64("<created_at_iso>|<id>") — opaque to the client,
 // easy to decode on the server.
@@ -158,10 +170,11 @@ app.post("/simulate-writes", async (req, res) => {
   try {
     await client.query("BEGIN");
     for (let i = 0; i < n; i++) {
+      const category = CATEGORIES[i % CATEGORIES.length];
       await client.query(
         `INSERT INTO products (name, category, price, created_at, updated_at)
          VALUES ($1, $2, $3, now(), now())`,
-        [`Live New Product ${Date.now()}-${i}`, "Electronics", 99.99]
+        [`Live New Product ${Date.now()}-${i}`, category, 99.99]
       );
     }
     await client.query(
