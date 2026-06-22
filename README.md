@@ -4,6 +4,16 @@
 
 This is a backend for browsing about 200,000 products, newest first, filterable by category, and paginated in a way that stays correct even while products are being added or updated concurrently.
 
+## Architecture
+
+```text
+Frontend/UI
+    ↓
+Express API
+    ↓
+PostgreSQL (Supabase)
+```
+
 ## Stack
 
 - Node.js
@@ -261,6 +271,26 @@ Coverage includes:
 - category filtering returns only rows from the requested category
 - cursor pagination remains consistent when a newer product is inserted between page requests
 
+## Test Results
+
+These are integration tests executed against PostgreSQL.
+
+```bash
+npm test
+```
+
+Output:
+
+```text
+✔ pagination returns first page, second page, and no duplicate products
+✔ category filter returns only products from the requested category
+✔ cursor remains stable when a newer product is inserted between page loads
+
+tests 3
+pass 3
+fail 0
+```
+
 ## EXPLAIN ANALYZE evidence
 
 Run these commands in PostgreSQL after seeding the database. Replace the timestamp and id values with the `createdAt` and `id` decoded from a real `nextCursor`.
@@ -334,10 +364,11 @@ I fixed it by checking the POST response and re-fetching the current page after 
 
 ## What I'd improve with more time
 
-- Add an automated test for the concurrent-write scenario instead of relying on manual verification.
-- Commit `EXPLAIN ANALYZE` output showing PostgreSQL is using the composite index.
-- Add stronger input validation and rate limiting before treating the endpoints as production-ready.
+- Add HMAC-signed cursors to prevent cursor tampering.
+- Add rate limiting, monitoring, and alerting.
+- Load test pagination with 1M+ products.
+- Generate automated benchmark reports for pagination latency.
 
 ## How I used AI
 
-I used Claude/Codex to scaffold boilerplate and debug the `simulate-writes` UI bug. The core pagination design decisions - cursor pagination instead of offset pagination, using `(created_at, id)` as the composite cursor, and sorting by `created_at` instead of `updated_at` - were my own reasoning, and I made sure I could fully explain them.
+AI helped with implementation details, debugging, and code review. I evaluated the tradeoffs myself and made the final decisions regarding pagination strategy, indexing, testing, and cursor design.
