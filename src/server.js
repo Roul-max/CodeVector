@@ -52,6 +52,7 @@ const pool = new Pool({
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 100;
+const ID_PATTERN = /^\d+$/;
 const CATEGORIES = [
   "Electronics",
   "Home & Kitchen",
@@ -65,21 +66,92 @@ const CATEGORIES = [
   "Office Supplies",
 ];
 
-// Cursor is just base64("<created_at_iso>|<id>") — opaque to the client,
-// easy to decode on the server.
+function validateLimit(rawLimit) {
+  if (rawLimit === undefined) return { limit: DEFAULT_LIMIT };
+  if (Array.isArray(rawLimit)) {
+    return { error: "limit must be a single integer between 1 and 100" };
+  }
+
+  const limit = Number(rawLimit);
+  if (!Number.isInteger(limit) || limit < 1 || limit > MAX_LIMIT) {
+    return { error: "limit must be an integer between 1 and 100" };
+  }
+
+  return { limit };
+}
+
+function validateCount(rawCount) {
+  if (rawCount === undefined) return { count: 50 };
+
+  const count = Number(rawCount);
+  if (!Number.isInteger(count) || count < 1 || count > 500) {
+    return { error: "count must be an integer between 1 and 500" };
+  }
+
+  return { count };
+}
+
+function isValidBase64(value) {
+  if (typeof value !== "string" || value.trim() === "") return false;
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(value) || value.length % 4 !== 0) {
+    return false;
+  }
+
+  return Buffer.from(value, "base64").toString("base64") === value;
+}
+
+function isValidTimestamp(value) {
+  if (typeof value !== "string") return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value;
+}
+
+function isValidId(value) {
+  if (typeof value === "number") return Number.isInteger(value) && value > 0;
+  return typeof value === "string" && ID_PATTERN.test(value) && Number(value) > 0;
+}
+
+// Cursor is base64(JSON.stringify({ createdAt, id })) - opaque to the client,
+// easy to validate on the server.
 function encodeCursor(createdAt, id) {
-  return Buffer.from(`${new Date(createdAt).toISOString()}|${id}`).toString("base64");
+  return Buffer.from(
+    JSON.stringify({ createdAt: new Date(createdAt).toISOString(), id: Number(id) })
+  ).toString("base64");
 }
 
 function decodeCursor(cursor) {
-  try {
-    const decoded = Buffer.from(cursor, "base64").toString("utf8");
-    const [createdAt, id] = decoded.split("|");
-    if (!createdAt || !id) return null;
-    return { createdAt, id: Number(id) };
-  } catch {
-    return null;
+  if (Array.isArray(cursor)) {
+    return { error: "cursor must be a single value" };
   }
+  if (!isValidBase64(cursor)) {
+    return { error: "cursor must be valid base64" };
+  }
+
+  const decoded = Buffer.from(cursor, "base64").toString("utf8");
+  let parsed;
+  try {
+    parsed = JSON.parse(decoded);
+  } catch {
+    return { error: "cursor must decode to valid JSON" };
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { error: "cursor JSON must be an object" };
+  }
+  if (!Object.prototype.hasOwnProperty.call(parsed, "createdAt")) {
+    return { error: "cursor is missing createdAt" };
+  }
+  if (!Object.prototype.hasOwnProperty.call(parsed, "id")) {
+    return { error: "cursor is missing id" };
+  }
+  if (!isValidTimestamp(parsed.createdAt)) {
+    return { error: "cursor createdAt must be a valid ISO timestamp" };
+  }
+  if (!isValidId(parsed.id)) {
+    return { error: "cursor id must be a positive integer" };
+  }
+
+  return { createdAt: parsed.createdAt, id: Number(parsed.id) };
 }
 
 /**
@@ -91,7 +163,12 @@ function decodeCursor(cursor) {
  *               (omit for the first page)
  */
 app.get("/products", async (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit) || DEFAULT_LIMIT, MAX_LIMIT);
+  const limitResult = validateLimit(req.query.limit);
+  if (limitResult.error) {
+    return res.status(400).json({ error: limitResult.error });
+  }
+
+  const { limit } = limitResult;
   const { category, cursor } = req.query;
 
   const conditions = [];
@@ -104,8 +181,8 @@ app.get("/products", async (req, res) => {
 
   if (cursor) {
     const decoded = decodeCursor(cursor);
-    if (!decoded) {
-      return res.status(400).json({ error: "Invalid cursor" });
+    if (decoded.error) {
+      return res.status(400).json({ error: decoded.error });
     }
     params.push(decoded.createdAt);
     params.push(decoded.id);
@@ -165,7 +242,16 @@ app.get("/categories", async (_req, res) => {
  * ones, simulating "50 products added/updated while someone is browsing."
  */
 app.post("/simulate-writes", async (req, res) => {
-  const n = Math.min(parseInt(req.body?.count) || 50, 500);
+  if (process.env.NODE_ENV === "production") {
+    return res.status(403).json({ error: "simulate-writes is disabled in production" });
+  }
+
+  const countResult = validateCount(req.body?.count);
+  if (countResult.error) {
+    return res.status(400).json({ error: countResult.error });
+  }
+
+  const n = countResult.count;
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -196,4 +282,8 @@ app.post("/simulate-writes", async (req, res) => {
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+if (require.main === module) {
+  app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+}
+
+module.exports = { app, pool, encodeCursor, decodeCursor };

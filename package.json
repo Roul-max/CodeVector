@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "test": "node --test",
     "seed": "node scripts/seed.js",
     "migrate": "node scripts/migrate.js"
   },
